@@ -38,10 +38,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/types.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 
 /******************************************************************************
  ~~~[ GLOBAL CONSTANTS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
+
+#define SHM_NAME "/xkaspa34_shm"
 
 const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
@@ -62,6 +70,18 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
   char *p_fname;                          /* Output filename. */
  } TS_arguments;
+
+
+/* Structure to be mapped as a shared memory between processes. */
+ typedef struct shared_mem {
+  int act_count;                          /* Actions counter. */
+  int last_writer;                        /* Internal number of last writer. */
+
+  unsigned wrtrs_num;                     /* Number of writers writing. */
+  unsigned rdrs_num;                      /* Number of readers reading. */
+
+  unsigned wrtrs_alive;                   /* Number of writers alive. */
+ } TS_shared_mem;
 
 
 /******************************************************************************
@@ -108,23 +128,27 @@ void process_args(int argc, char *argv[], TS_arguments *p_args)
   for (i = 1; i < ARGS_NUM; i++) {
 
     result = strtoll(argv[i], &endptr, 10);
-
+    
+    /* Invalid character in number encountered? */
     if (*endptr != '\0') {
       fprintf(stderr, "%s: %s: invalid number\n", argv[0], argv[i]);
       display_usage(argv[0]);
       exit(EXIT_FAILURE);
     }
-    else if (errno == EINVAL) {
+    /* Result value of long long range? */
+    else if (errno == ERANGE) {
       fprintf(stderr, "%s: %s: result value is too large\n", argv[0], argv[i]);
       display_usage(argv[0]);
       exit(EXIT_FAILURE);
     }
+    /* Negative value? */
     else if (result < 0) {
       fprintf(stderr, "%s: %s: negative values are not supported\n", argv[0],
               argv[i]);
       display_usage(argv[0]);
       exit(EXIT_FAILURE);
     }
+    /* Value too big to be stored in unsigned int? */
     else if ((unsigned long long) result > ULONG_MAX) {
       fprintf(stderr, "%s: %s: value too large to be stored in data type\n",
               argv[0], argv[i]);
@@ -132,7 +156,7 @@ void process_args(int argc, char *argv[], TS_arguments *p_args)
       exit(EXIT_FAILURE);
     }
 
-
+    /* Assigning into appropriate member of given structure. */
     switch (i) {
       case 1 :
         p_args->writers_num = (unsigned) result;
@@ -158,7 +182,8 @@ void process_args(int argc, char *argv[], TS_arguments *p_args)
         break;
     }
   }
-
+  
+  /* Processing last argument. */
   if (strcmp(argv[i], "-") == 0) {
     p_args->p_fname = NULL;
   }
@@ -218,6 +243,40 @@ int main(int argc, char *argv[])
     perror("");
     return EXIT_FAILURE;
   }
+
+  int shm_fd;                         /* File descriptor for shared memory. */
+ 
+  /* Try to create and open shared memory. */ 
+  if ((shm_fd = shm_open(SHM_NAME, O_RDWR|O_CREAT, 0600)) < 0) {
+    fprintf(stderr, "%s: ", argv[0]);
+    perror("");
+    return EXIT_FAILURE;
+  }
+
+  /* Truncating (extending) memory to size of TS_shared_mem structure. */
+  if (ftruncate(shm_fd, sizeof(TS_shared_mem)) != 0) {
+    fprintf(stderr, "%s: ", argv[0]);
+    perror("");
+    return EXIT_FAILURE;
+  }
+
+  /* Mapping shared memory into this process's virtual address space. */
+  TS_shared_mem *shm = mmap(NULL, sizeof(TS_shared_mem), PROT_READ | PROT_WRITE,
+                            MAP_SHARED, shm_fd, 0);
+
+  /* Test of successful mapping. */
+  if (shm == MAP_FAILED) {
+    fprintf(stderr, "%s: ", argv[0]);
+    perror("");
+    return EXIT_FAILURE;
+  }
+  
+  // TODO: Children creating.
+
+  // TODO: Waiting until children are gone.
+
+  close(shm_fd);                      /* Closing file descriptor. */
+  shm_unlink(SHM_NAME);               /* Unlinking shared memory. */
 
   return EXIT_SUCCESS;
 }}}
