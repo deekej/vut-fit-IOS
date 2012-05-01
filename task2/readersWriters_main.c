@@ -31,7 +31,7 @@
 /******************************************************************************
  ~~~[ HEADER FILES ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
-
+//{{{
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -43,13 +43,14 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-
+#include <semaphore.h>
+//}}}
 
 /******************************************************************************
  ~~~[ GLOBAL CONSTANTS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
 
-#define SHM_NAME "/xkaspa34_shm"
+#define SHM_NAME "/xkaspa34"
 
 const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
@@ -57,7 +58,7 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 /******************************************************************************
  ~~~[ DATA TYPES DECLARATIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
-
+//{{{
 /* Structure for storing processed arguments of invocated program.  */
  typedef struct arguments {
   unsigned writers_num;                   /* Number of writers. */
@@ -82,7 +83,7 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
   unsigned wrtrs_alive;                   /* Number of writers alive. */
  } TS_shared_mem;
-
+//}}}
 
 /******************************************************************************
  ~~~[ FUNCTIONAL PROTOTYPES ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -241,15 +242,19 @@ int main(int argc, char *argv[])
     /* Printing error message upon failure and exiting.. */
     fprintf(stderr,"%s: %s: ", argv[0], args.p_fname);
     perror("");
+
     return EXIT_FAILURE;
   }
+
+  // // // // // // // // // // // // // // // // // // // // // // // // // //
 
   int shm_fd;                         /* File descriptor for shared memory. */
  
   /* Try to create and open shared memory. */ 
-  if ((shm_fd = shm_open(SHM_NAME, O_RDWR|O_CREAT, 0600)) < 0) {
+  if ((shm_fd = shm_open(SHM_NAME "_shm", O_RDWR|O_CREAT, 0600)) < 0) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
+
     return EXIT_FAILURE;
   }
 
@@ -257,6 +262,10 @@ int main(int argc, char *argv[])
   if (ftruncate(shm_fd, sizeof(TS_shared_mem)) != 0) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
+
+    close(shm_fd);
+    shm_unlink(SHM_NAME "_shm");
+
     return EXIT_FAILURE;
   }
 
@@ -268,15 +277,85 @@ int main(int argc, char *argv[])
   if (shm == MAP_FAILED) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
+
+    close(shm_fd);
+    shm_unlink(SHM_NAME "_shm");
+
     return EXIT_FAILURE;
   }
+
+  // // // // // // // // // // // // // // // // // // // // // // // // // //
+
+  sem_t *sem_read;            /* Semaphore of reading possibility. */
+  sem_t *sem_write;           /* Semaphore of writing possibility. */
+  sem_t *sem_rdrs_num;        /* Semaphore of shared memory for rdrs_num. */
+  sem_t *sem_wrtrs_num;       /* Semaphore of shared memory for wrtrs_num. */
+  sem_t *sem_counter;         /* Semaphore of shared memory for act_count. */
+  sem_t *sem_wrtrs_alive;     /* Semaphore of shared memory for wrtrs_alive. */
+
+  /*
+   * Opening and initializing semaphores specified above.
+   */
+  sem_read = sem_open(SHM_NAME "_read", O_CREAT, 0600, 1);
+  sem_write = sem_open(SHM_NAME "_write", O_CREAT, 0600, 1);
+  sem_rdrs_num = sem_open(SHM_NAME "_rdrs_num", O_CREAT, 0600, 1);
+  sem_wrtrs_num = sem_open(SHM_NAME "_wrtrs_num", O_CREAT, 0600, 1);
+  sem_counter = sem_open(SHM_NAME "_counter", O_CREAT, 0600, 1);
+  sem_wrtrs_alive = sem_open(SHM_NAME "_wrtrs_alive", O_CREAT, 0600, 1);
+
+  /*
+   * Test of successful opening of semaphores.
+   */
+  if (sem_write == SEM_FAILED || sem_wrtrs_num == SEM_FAILED ||
+      sem_read == SEM_FAILED || sem_rdrs_num == SEM_FAILED ||
+      sem_counter == SEM_FAILED || sem_wrtrs_alive == SEM_FAILED) {
+
+    fprintf(stderr, "%s: ", argv[0]);
+    perror("");
+
+    /* Closing and unlinking semaphores. */
+    sem_close(sem_read);
+    sem_close(sem_write);
+    sem_close(sem_rdrs_num);
+    sem_close(sem_wrtrs_num);
+    sem_close(sem_counter);
+    sem_close(sem_wrtrs_alive);
+
+    sem_unlink(SHM_NAME "_read");
+    sem_unlink(SHM_NAME "_write");
+    sem_unlink(SHM_NAME "_rdrs_num");
+    sem_unlink(SHM_NAME "_wrtrs_num");
+    sem_unlink(SHM_NAME "_counter");
+    sem_unlink(SHM_NAME "_wrtrs_alive");
+
+    close(shm_fd);
+    shm_unlink(SHM_NAME "_shm");
+    return EXIT_FAILURE;
+  }
+
   
   // TODO: Children creating.
 
   // TODO: Waiting until children are gone.
 
+
+  /* Closing and unlinking semaphores. */
+  sem_close(sem_read);
+  sem_close(sem_write);
+  sem_close(sem_rdrs_num);
+  sem_close(sem_wrtrs_num);
+  sem_close(sem_counter);
+  sem_close(sem_wrtrs_alive);
+
+  sem_unlink(SHM_NAME "_read");
+  sem_unlink(SHM_NAME "_write");
+  sem_unlink(SHM_NAME "_rdrs_num");
+  sem_unlink(SHM_NAME "_wrtrs_num");
+  sem_unlink(SHM_NAME "_counter");
+  sem_unlink(SHM_NAME "_wrtrs_alive");
+
   close(shm_fd);                      /* Closing file descriptor. */
-  shm_unlink(SHM_NAME);               /* Unlinking shared memory. */
+  shm_unlink(SHM_NAME "_shm");        /* Unlinking shared memory. */
 
   return EXIT_SUCCESS;
 }}}
