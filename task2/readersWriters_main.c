@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -50,17 +51,19 @@
  ~~~[ GLOBAL CONSTANTS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
 
+/* Name to be used to identify shared memory and semaphores of this program. */
 #define SHM_NAME "/xkaspa34"
 
+/* Name of shared memory. */
 #define SHARED_MEM        SHM_NAME "_shm"
 
+/* Names of semaphores used. */
 #define SEM_READ          SHM_NAME "_read"
 #define SEM_WRITE         SHM_NAME "_write"
 #define SEM_RDRS_NUM      SHM_NAME "_rdrs_num"
 #define SEM_WRTRS_NUM     SHM_NAME "_wrtrs_num"
 #define SEM_COUNTER       SHM_NAME "_counter"
 #define SEM_WRTRS_ALIVE   SHM_NAME "_wrtrs_alive"
-
 
 const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
@@ -88,8 +91,8 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
   int counter;                            /* Actions counter. */
   int last_writer;                        /* Internal number of last writer. */
 
-  unsigned wrtrs_num;                     /* Number of writers writing. */
   unsigned rdrs_num;                      /* Number of readers reading. */
+  unsigned wrtrs_num;                     /* Number of writers writing. */
 
   unsigned wrtrs_alive;                   /* Number of writers alive. */
  } TS_shared_mem;
@@ -117,6 +120,11 @@ int semaphores_open(TS_semaphores *sem);
 void semaphores_close(TS_semaphores *sem);
 void semaphores_unlink(void);
 
+static inline void sem_lock(sem_t *sem, const char *proc, unsigned id);
+static inline void sem_unlock(sem_t *sem, const char *proc, unsigned id);
+
+void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
+            unsigned cycles);
 
 /******************************************************************************
  ~~~[ AUXILIARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -246,10 +254,6 @@ static inline void display_usage(char *prg_name)
 }}}
 
 
-/******************************************************************************
- ~~~[ PRIMARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- ******************************************************************************/
-
 /**
  * Tries to open all semaphores of given TS_semaphores structure. Returns
  * EXIT_FAILURE and errno is set, otherwise EXIT_SUCCESS is returned.
@@ -316,6 +320,164 @@ void semaphores_unlink(void)
 }}}
 
 
+/**
+ * Wrapper function for semaphore locking. Terminates the process in case
+ * semaphore lock cannot be achieved. Proc is the name of process who is
+ * performing the lock, id is his identifier.
+ */
+static inline void sem_lock(sem_t *sem, const char *proc, unsigned id)
+{{{
+  if (sem_wait(sem) != 0) {
+    fprintf(stderr, "%s: %u: ", proc, id);
+    perror("");
+    exit(EXIT_FAILURE);
+  }
+  
+  return;
+}}}
+
+
+/**
+ * Wrapper function for semaphore unlocking. Terminates the process in case
+ * semaphore unlock cannot be achieved. Proc is the name of process who is
+ * performing the unlock, id is his identifier.
+ */
+static inline void sem_unlock(sem_t *sem, const char *proc, unsigned id)
+{{{
+  if (sem_post(sem) != 0) {
+    fprintf(stderr, "%s: %u: ", proc, id);
+    perror("");
+    exit(EXIT_FAILURE);
+  }
+  
+  return;
+}}}
+
+
+/******************************************************************************
+ ~~~[ PRIMARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ ******************************************************************************/
+
+void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
+            unsigned cycles)
+{{{
+  /* Lock for 'writers alive'. */
+  sem_lock(sem->wrtrs_alive, "writer", id);
+  {
+    /* 
+     * Increasing value, so the main can determine how many writers are still 
+     * alive.
+     */
+    shm->wrtrs_alive++;
+  }
+  sem_unlock(sem->wrtrs_alive, "writer", id);
+
+
+  srand((unsigned int) time(NULL));
+
+  
+  /* Repeats for number specified in cycles. */
+  for (unsigned i = 0; i < cycles; i++) {
+
+    /* Lock for actions counter (output). */
+    sem_lock(sem->counter, "writer", id);
+    {
+      fprintf(stdout, "%d: writer: %u: new value\n", shm->counter, id);
+      shm->counter++;
+    }
+    sem_unlock(sem->counter, "writer", id);
+
+
+    /* Trying to put process to sleep from 0 to slpt milliseconds. */
+    if (slpt != 0 && usleep(1000 * (rand() % slpt)) != 0) {
+      fprintf(stderr, "writer: %u: ", id);
+      perror("");
+      exit(EXIT_FAILURE);
+    }
+
+
+    /* Lock for actions counter (output). */
+    sem_lock(sem->counter, "writer", id);
+    {
+      fprintf(stdout, "%d: writer: %u: ready\n", shm->counter, id);
+      shm->counter++;
+    }
+    sem_unlock(sem->counter, "writer", id);
+
+    
+    /* Lock for number of actual writers writing. */
+    sem_lock(sem->wrtrs_num, "writer", id);
+    {
+      shm->wrtrs_num++;
+      
+      /*
+       * First writer also locks 'read' semaphore, so the new coming readers
+       * can't access the shared memory for the time of writers performing
+       * actions.
+       */
+      if (shm->wrtrs_num == 1) {
+        sem_lock(sem->read, "writer", id);
+      }
+    }
+    sem_unlock(sem->wrtrs_num, "writer", id);
+
+
+    /* 
+     * Lock for writer's semaphore, allowing only one writer at the time to edit
+     * shared memory.
+     */
+    sem_lock(sem->write, "writer", id);
+    {
+      /* Lock for actions counter (output). */
+      sem_lock(sem->counter, "writer", id);
+      {
+        fprintf(stdout, "%d: writer: %u: writes a value\n", shm->counter, id);
+        shm->counter++;
+      }
+      sem_unlock(sem->counter, "writer", id);
+      
+      shm->last_writer = id;              /* Writer is writing his value. */
+      
+      /* Lock for actions counter (output). */
+      sem_lock(sem->counter, "writer", id);
+      {
+        fprintf(stdout, "%d: writer: %u: written\n", shm->counter, id);
+        shm->counter++;
+      }
+      sem_unlock(sem->counter, "writer", id);
+    }
+    sem_unlock(sem->write, "writer", id);
+
+  
+    /* Lock for number of actual writers writing. */
+    sem_lock(sem->wrtrs_num, "writer", id);
+    {
+      shm->wrtrs_num--;
+      
+      /*
+       * If the actual writer is the last one, then he opens semaphore for
+       * readers.
+       */
+      if (shm->wrtrs_num == 0) {
+        sem_unlock(sem->read, "writer", id);
+      }
+    }
+    sem_unlock(sem->wrtrs_num, "writer", id);
+  }
+
+  
+  /* Lock for 'writers alive'. */
+  sem_lock(sem->wrtrs_alive, "writer", id);
+  { 
+    /* Writer is terminating, decreasing value. */
+    shm->wrtrs_alive--;
+  }
+  sem_unlock(sem->wrtrs_alive, "writer", id);
+
+  exit(EXIT_SUCCESS);
+}}}
+
+
 /******************************************************************************
  ~~~[ MAIN FUNCTION ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
@@ -336,20 +498,24 @@ int main(int argc, char *argv[])
     return EXIT_FAILURE;
   }
 
-  // // // // // // // // // // // // // // // // // // // // // // // // // //
+  /* Terminating buffering so the output is immediately written. */
+  setbuf(stdout, NULL);
+  
+              
 
-  int shm_fd;                           /* File descriptor for shared memory. */
+
+  int shm_fd;                         /* File descriptor for shared memory. */
+  TS_shared_mem *shm;                 /* Pointer to shared memory structure. */
  
   /* Try to create and open shared memory. */ 
-  if ((shm_fd = shm_open(SHARED_MEM, O_RDWR|O_CREAT, 0600)) < 0) {
+  if ((shm_fd = shm_open(SHARED_MEM, O_CREAT | O_RDWR, 0600)) < 0) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
 
     return EXIT_FAILURE;
   }
-
   /* Truncating (extending) memory to size of TS_shared_mem structure. */
-  if (ftruncate(shm_fd, sizeof(TS_shared_mem)) != 0) {
+  else if (ftruncate(shm_fd, sizeof(TS_shared_mem)) != 0) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
 
@@ -358,13 +524,9 @@ int main(int argc, char *argv[])
 
     return EXIT_FAILURE;
   }
-
   /* Mapping shared memory into this process's virtual address space. */
-  TS_shared_mem *shm = mmap(NULL, sizeof(TS_shared_mem), PROT_READ | PROT_WRITE,
-                            MAP_SHARED, shm_fd, 0);
-
-  /* Test of successful mapping. */
-  if (shm == MAP_FAILED) {
+  else if ((shm = mmap(NULL, sizeof(TS_shared_mem), PROT_READ | PROT_WRITE,
+                       MAP_SHARED, shm_fd, 0)) == MAP_FAILED) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
 
@@ -373,8 +535,6 @@ int main(int argc, char *argv[])
 
     return EXIT_FAILURE;
   }
-
-  // // // // // // // // // // // // // // // // // // // // // // // // // //
 
   TS_semaphores sem;
 
@@ -384,8 +544,19 @@ int main(int argc, char *argv[])
 
     close(shm_fd);
     shm_unlink(SHARED_MEM);
+
     return EXIT_FAILURE;
   }
+
+  /* Shared memory initialization. */
+  shm->counter = 1;
+  shm->last_writer = -1;
+
+  shm->rdrs_num = 0;
+  shm->wrtrs_num = 0;
+  shm->wrtrs_alive = 0;
+
+
 
 
   // TODO: Children creating.
