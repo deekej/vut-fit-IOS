@@ -52,6 +52,16 @@
 
 #define SHM_NAME "/xkaspa34"
 
+#define SHARED_MEM        SHM_NAME "_shm"
+
+#define SEM_READ          SHM_NAME "_read"
+#define SEM_WRITE         SHM_NAME "_write"
+#define SEM_RDRS_NUM      SHM_NAME "_rdrs_num"
+#define SEM_WRTRS_NUM     SHM_NAME "_wrtrs_num"
+#define SEM_COUNTER       SHM_NAME "_counter"
+#define SEM_WRTRS_ALIVE   SHM_NAME "_wrtrs_alive"
+
+
 const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
 
@@ -75,7 +85,7 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
 /* Structure to be mapped as a shared memory between processes. */
  typedef struct shared_mem {
-  int act_count;                          /* Actions counter. */
+  int counter;                            /* Actions counter. */
   int last_writer;                        /* Internal number of last writer. */
 
   unsigned wrtrs_num;                     /* Number of writers writing. */
@@ -83,6 +93,17 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
   unsigned wrtrs_alive;                   /* Number of writers alive. */
  } TS_shared_mem;
+
+
+/* Structure containing pointers to all semaphores used by program. */
+typedef struct semaphores {
+  sem_t *read;                /* Semaphore of reading possibility. */
+  sem_t *write;               /* Semaphore of writing possibility. */
+  sem_t *rdrs_num;            /* Semaphore of shared memory for rdrs_num. */
+  sem_t *wrtrs_num;           /* Semaphore of shared memory for wrtrs_num. */
+  sem_t *counter;             /* Semaphore of shared memory for act_count. */
+  sem_t *wrtrs_alive;         /* Semaphore of shared memory for wrtrs_alive. */
+} TS_semaphores;
 //}}}
 
 /******************************************************************************
@@ -91,6 +112,10 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
 void process_args(int argc, char *argv[], TS_arguments *p_args);
 static inline void display_usage(char *prg_name);
+
+int semaphores_open(TS_semaphores *sem);
+void semaphores_close(TS_semaphores *sem);
+void semaphores_unlink(void);
 
 
 /******************************************************************************
@@ -225,6 +250,71 @@ static inline void display_usage(char *prg_name)
  ~~~[ PRIMARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
 
+/**
+ * Tries to open all semaphores of given TS_semaphores structure. Returns
+ * EXIT_FAILURE and errno is set, otherwise EXIT_SUCCESS is returned.
+ */
+int semaphores_open(TS_semaphores *sem)
+{{{
+  /* Opening and initializing semaphores in given semaphores structure. */
+  sem->read = sem_open(SEM_READ, O_CREAT, 0600, 1);
+  sem->write = sem_open(SEM_WRITE, O_CREAT, 0600, 1);
+  sem->rdrs_num = sem_open(SEM_RDRS_NUM, O_CREAT, 0600, 1);
+  sem->wrtrs_num = sem_open(SEM_WRTRS_NUM, O_CREAT, 0600, 1);
+  sem->counter = sem_open(SEM_COUNTER, O_CREAT, 0600, 1);
+  sem->wrtrs_alive = sem_open(SEM_WRTRS_ALIVE, O_CREAT, 0600, 1);
+
+  /* Test of successful opening of semaphores. */
+  if (sem->write == SEM_FAILED || sem->wrtrs_num == SEM_FAILED ||
+      sem->read == SEM_FAILED || sem->rdrs_num == SEM_FAILED ||
+      sem->counter == SEM_FAILED || sem->wrtrs_alive == SEM_FAILED) {
+    
+    /* Backup of errno because functions below can change it. */
+    int errno_backup = errno;
+
+    /* Closing and unlinking semaphores because of opening failure. */
+    semaphores_close(sem);
+    semaphores_unlink();
+
+    errno = errno_backup;
+    return EXIT_FAILURE;
+  }
+
+  return EXIT_SUCCESS;
+}}}
+
+
+/**
+ * Tries to close every semaphore of given TS_semaphores structure.
+ */
+void semaphores_close(TS_semaphores *sem)
+{{{
+  sem_close(sem->read);
+  sem_close(sem->write);
+  sem_close(sem->rdrs_num);
+  sem_close(sem->wrtrs_num);
+  sem_close(sem->counter);
+  sem_close(sem->wrtrs_alive);
+
+  return;
+}}}
+
+
+/**
+ * Tries to unlink all semaphores of this program.
+ */
+void semaphores_unlink(void)
+{{{
+  sem_unlink(SEM_READ);
+  sem_unlink(SEM_WRITE);
+  sem_unlink(SEM_RDRS_NUM);
+  sem_unlink(SEM_WRTRS_NUM);
+  sem_unlink(SEM_COUNTER);
+  sem_unlink(SEM_WRTRS_ALIVE);
+
+  return;
+}}}
+
 
 /******************************************************************************
  ~~~[ MAIN FUNCTION ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -248,10 +338,10 @@ int main(int argc, char *argv[])
 
   // // // // // // // // // // // // // // // // // // // // // // // // // //
 
-  int shm_fd;                         /* File descriptor for shared memory. */
+  int shm_fd;                           /* File descriptor for shared memory. */
  
   /* Try to create and open shared memory. */ 
-  if ((shm_fd = shm_open(SHM_NAME "_shm", O_RDWR|O_CREAT, 0600)) < 0) {
+  if ((shm_fd = shm_open(SHARED_MEM, O_RDWR|O_CREAT, 0600)) < 0) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
 
@@ -264,7 +354,7 @@ int main(int argc, char *argv[])
     perror("");
 
     close(shm_fd);
-    shm_unlink(SHM_NAME "_shm");
+    shm_unlink(SHARED_MEM);
 
     return EXIT_FAILURE;
   }
@@ -279,83 +369,36 @@ int main(int argc, char *argv[])
     perror("");
 
     close(shm_fd);
-    shm_unlink(SHM_NAME "_shm");
+    shm_unlink(SHARED_MEM);
 
     return EXIT_FAILURE;
   }
 
   // // // // // // // // // // // // // // // // // // // // // // // // // //
 
-  sem_t *sem_read;            /* Semaphore of reading possibility. */
-  sem_t *sem_write;           /* Semaphore of writing possibility. */
-  sem_t *sem_rdrs_num;        /* Semaphore of shared memory for rdrs_num. */
-  sem_t *sem_wrtrs_num;       /* Semaphore of shared memory for wrtrs_num. */
-  sem_t *sem_counter;         /* Semaphore of shared memory for act_count. */
-  sem_t *sem_wrtrs_alive;     /* Semaphore of shared memory for wrtrs_alive. */
+  TS_semaphores sem;
 
-  /*
-   * Opening and initializing semaphores specified above.
-   */
-  sem_read = sem_open(SHM_NAME "_read", O_CREAT, 0600, 1);
-  sem_write = sem_open(SHM_NAME "_write", O_CREAT, 0600, 1);
-  sem_rdrs_num = sem_open(SHM_NAME "_rdrs_num", O_CREAT, 0600, 1);
-  sem_wrtrs_num = sem_open(SHM_NAME "_wrtrs_num", O_CREAT, 0600, 1);
-  sem_counter = sem_open(SHM_NAME "_counter", O_CREAT, 0600, 1);
-  sem_wrtrs_alive = sem_open(SHM_NAME "_wrtrs_alive", O_CREAT, 0600, 1);
-
-  /*
-   * Test of successful opening of semaphores.
-   */
-  if (sem_write == SEM_FAILED || sem_wrtrs_num == SEM_FAILED ||
-      sem_read == SEM_FAILED || sem_rdrs_num == SEM_FAILED ||
-      sem_counter == SEM_FAILED || sem_wrtrs_alive == SEM_FAILED) {
-
+  if (semaphores_open(&sem) == EXIT_FAILURE) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
 
-    /* Closing and unlinking semaphores. */
-    sem_close(sem_read);
-    sem_close(sem_write);
-    sem_close(sem_rdrs_num);
-    sem_close(sem_wrtrs_num);
-    sem_close(sem_counter);
-    sem_close(sem_wrtrs_alive);
-
-    sem_unlink(SHM_NAME "_read");
-    sem_unlink(SHM_NAME "_write");
-    sem_unlink(SHM_NAME "_rdrs_num");
-    sem_unlink(SHM_NAME "_wrtrs_num");
-    sem_unlink(SHM_NAME "_counter");
-    sem_unlink(SHM_NAME "_wrtrs_alive");
-
     close(shm_fd);
-    shm_unlink(SHM_NAME "_shm");
+    shm_unlink(SHARED_MEM);
     return EXIT_FAILURE;
   }
 
-  
+
   // TODO: Children creating.
 
   // TODO: Waiting until children are gone.
 
 
   /* Closing and unlinking semaphores. */
-  sem_close(sem_read);
-  sem_close(sem_write);
-  sem_close(sem_rdrs_num);
-  sem_close(sem_wrtrs_num);
-  sem_close(sem_counter);
-  sem_close(sem_wrtrs_alive);
+  semaphores_close(&sem);
+  semaphores_unlink();
 
-  sem_unlink(SHM_NAME "_read");
-  sem_unlink(SHM_NAME "_write");
-  sem_unlink(SHM_NAME "_rdrs_num");
-  sem_unlink(SHM_NAME "_wrtrs_num");
-  sem_unlink(SHM_NAME "_counter");
-  sem_unlink(SHM_NAME "_wrtrs_alive");
-
-  close(shm_fd);                      /* Closing file descriptor. */
-  shm_unlink(SHM_NAME "_shm");        /* Unlinking shared memory. */
+  close(shm_fd);                            /* Closing file descriptor. */
+  shm_unlink(SHARED_MEM);                   /* Unlinking shared memory. */
 
   return EXIT_SUCCESS;
 }}}
