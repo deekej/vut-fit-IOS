@@ -1,6 +1,6 @@
 /**
  * File:          readersWriters_reader.c
- * Version:       0.7
+ * Version:       0.9
  * Date:          29-04-2012
  * Last update:   02-05-2012
  *
@@ -49,85 +49,85 @@
  * Function (process) of reader. Reads as long as the read value is not zero.
  * Also prints its actions to output.
  */
-void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt)
+void reader(TS_shared_mem *p_shm, TS_semaphores *p_sem, unsigned id, unsigned slpt)
 {{{
   int last_writer;
 
   do {
     /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "reader", id);
+    sem_lock(p_sem->counter, "reader", id);
     {
-      fprintf(stdout, "%d: reader: %u: ready\n", shm->counter, id);
-      shm->counter++;
+      fprintf(stdout, "%d: reader: %u: ready\n", p_shm->counter, id);
+      p_shm->counter++;
     }
-    sem_unlock(sem->counter, "reader", id);
+    sem_unlock(p_sem->counter, "reader", id);
 
     
     /* Locking of readers queue (writers has absolute priority). */
-    sem_lock(sem->rdrs_front, "reader", id);
+    sem_lock(p_sem->rdrs_front, "reader", id);
     { 
 
       /* Lock for reading request. */
-      sem_lock(sem->read, "reader", id);
+      sem_lock(p_sem->read, "reader", id);
       {
 
         /* Able to read, locking 'readers_num'. */
-        sem_lock(sem->rdrs_num, "reader", id);
+        sem_lock(p_sem->rdrs_num, "reader", id);
         {
-          shm->rdrs_num++;              /* Increasing number of readers. */
+          p_shm->rdrs_num++;            /* Increasing number of readers. */
           
          /*
           * If the actual reader is the first reader, then it locks semaphore of
           * writer so he can't write into the shared memory while readers are
           * reading.
           */
-          if (shm->rdrs_num == 1) {
-            sem_lock(sem->write, "reader", id);
+          if (p_shm->rdrs_num == 1) {
+            sem_lock(p_sem->write, "reader", id);
           }
         }
-        sem_unlock(sem->rdrs_num, "reader", id);
+        sem_unlock(p_sem->rdrs_num, "reader", id);
       }
-      sem_unlock(sem->read, "reader", id);
+      sem_unlock(p_sem->read, "reader", id);
     }
-    sem_unlock(sem->rdrs_front, "reader", id);
+    sem_unlock(p_sem->rdrs_front, "reader", id);
 
     
     /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "reader", id);
+    sem_lock(p_sem->counter, "reader", id);
     {
-      fprintf(stdout, "%d: reader: %u: reads a value\n", shm->counter, id);
-      shm->counter++;
+      fprintf(stdout, "%d: reader: %u: reads a value\n", p_shm->counter, id);
+      p_shm->counter++;
     }
-    sem_unlock(sem->counter, "reader", id);
+    sem_unlock(p_sem->counter, "reader", id);
 
     
-    last_writer = shm->last_writer;     /* Value reading. */
+    last_writer = p_shm->last_writer;   /* Value reading. */
 
     
     /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "reader", id);
+    sem_lock(p_sem->counter, "reader", id);
     {
-      fprintf(stdout, "%d: reader: %u: read: %d\n", shm->counter, id,
+      fprintf(stdout, "%d: reader: %u: read: %d\n", p_shm->counter, id,
               last_writer);
-      shm->counter++;
+      p_shm->counter++;
     }
-    sem_unlock(sem->counter, "reader", id);
+    sem_unlock(p_sem->counter, "reader", id);
 
     
     /* Lock for 'readers number'. */
-    sem_lock(sem->rdrs_num, "reader", id);
+    sem_lock(p_sem->rdrs_num, "reader", id);
     {
-      shm->rdrs_num--;                  /* Decreasing number of readers. */
+      p_shm->rdrs_num--;                /* Decreasing number of readers. */
       
       /*
        * If the actual process is the last reader, then unlocks the semaphore of
        * writer so he can start writing.
        */
-      if (shm->rdrs_num == 0) {
-        sem_unlock(sem->write, "reader", id);
+      if (p_shm->rdrs_num == 0) {
+        sem_unlock(p_sem->write, "reader", id);
       }
     }
-    sem_unlock(sem->rdrs_num, "reader", id);
+    sem_unlock(p_sem->rdrs_num, "reader", id);
 
 
     /* Trying to put process to sleep from 0 to slpt milliseconds. */
@@ -140,7 +140,7 @@ void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt)
   /* Reads until the read value is 0. */
   } while (last_writer != 0);
 
-  semaphores_close(sem);
+  semaphores_close(p_sem);
 
   exit(EXIT_SUCCESS);
 }}}

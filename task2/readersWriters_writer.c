@@ -1,6 +1,6 @@
 /**
  * File:          readersWriters_writer.c
- * Version:       0.7
+ * Version:       0.9
  * Date:          29-04-2012
  * Last update:   02-05-2012
  *
@@ -52,19 +52,19 @@
  * Function (process) of writer. Writes the n-times into shared memory, the n is
  * specified by given argument cycles. Also prints its actions to output.
  */
-void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
-            unsigned cycles)
+void writer(TS_shared_mem *p_shm, TS_semaphores *p_sem, unsigned id,
+            unsigned slpt, unsigned cycles)
 {{{
   /* Lock for 'writers alive'. */
-  sem_lock(sem->wrtrs_alive, "writer", id);
+  sem_lock(p_sem->wrtrs_alive, "writer", id);
   {
     /* 
      * Increasing value, so the main can determine how many writers are still 
      * alive.
      */
-    shm->wrtrs_alive++;
+    p_shm->wrtrs_alive++;
   }
-  sem_unlock(sem->wrtrs_alive, "writer", id);
+  sem_unlock(p_sem->wrtrs_alive, "writer", id);
 
 
   srand((unsigned int) time(NULL));         /* Getting new seed for rand(). */
@@ -74,12 +74,12 @@ void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
   for (unsigned i = 0; i < cycles; i++) {
 
     /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "writer", id);
+    sem_lock(p_sem->counter, "writer", id);
     {
-      fprintf(stdout, "%d: writer: %u: new value\n", shm->counter, id);
-      shm->counter++;
+      fprintf(stdout, "%d: writer: %u: new value\n", p_shm->counter, id);
+      p_shm->counter++;
     }
-    sem_unlock(sem->counter, "writer", id);
+    sem_unlock(p_sem->counter, "writer", id);
 
 
     /* Trying to put process to sleep from 0 to slpt milliseconds. */
@@ -91,86 +91,86 @@ void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
 
 
     /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "writer", id);
+    sem_lock(p_sem->counter, "writer", id);
     {
-      fprintf(stdout, "%d: writer: %u: ready\n", shm->counter, id);
-      shm->counter++;
+      fprintf(stdout, "%d: writer: %u: ready\n", p_shm->counter, id);
+      p_shm->counter++;
     }
-    sem_unlock(sem->counter, "writer", id);
+    sem_unlock(p_sem->counter, "writer", id);
 
     
     /* Lock for number of actual writers writing. */
-    sem_lock(sem->wrtrs_num, "writer", id);
+    sem_lock(p_sem->wrtrs_num, "writer", id);
     {
-      shm->wrtrs_num++;
+      p_shm->wrtrs_num++;
       
       /*
        * First writer also locks 'read' semaphore, so the new coming readers
        * can't access the shared memory for the time of writers performing
        * actions.
        */
-      if (shm->wrtrs_num == 1) {
-        sem_lock(sem->read, "writer", id);
+      if (p_shm->wrtrs_num == 1) {
+        sem_lock(p_sem->read, "writer", id);
       }
     }
-    sem_unlock(sem->wrtrs_num, "writer", id);
+    sem_unlock(p_sem->wrtrs_num, "writer", id);
 
 
     /* 
      * Lock for writer's semaphore, allowing only one writer at the time to edit
      * shared memory.
      */
-    sem_lock(sem->write, "writer", id);
+    sem_lock(p_sem->write, "writer", id);
     {
       /* Lock for actions counter (output). */
-      sem_lock(sem->counter, "writer", id);
+      sem_lock(p_sem->counter, "writer", id);
       {
-        fprintf(stdout, "%d: writer: %u: writes a value\n", shm->counter, id);
-        shm->counter++;
+        fprintf(stdout, "%d: writer: %u: writes a value\n", p_shm->counter, id);
+        p_shm->counter++;
       }
-      sem_unlock(sem->counter, "writer", id);
+      sem_unlock(p_sem->counter, "writer", id);
 
       
-      shm->last_writer = id;              /* Writer is writing his value. */
+      p_shm->last_writer = id;            /* Writer is writing his value. */
 
       
       /* Lock for actions counter (output). */
-      sem_lock(sem->counter, "writer", id);
+      sem_lock(p_sem->counter, "writer", id);
       {
-        fprintf(stdout, "%d: writer: %u: written\n", shm->counter, id);
-        shm->counter++;
+        fprintf(stdout, "%d: writer: %u: written\n", p_shm->counter, id);
+        p_shm->counter++;
       }
-      sem_unlock(sem->counter, "writer", id);
+      sem_unlock(p_sem->counter, "writer", id);
     }
-    sem_unlock(sem->write, "writer", id);
+    sem_unlock(p_sem->write, "writer", id);
 
   
     /* Lock for number of actual writers writing. */
-    sem_lock(sem->wrtrs_num, "writer", id);
+    sem_lock(p_sem->wrtrs_num, "writer", id);
     {
-      shm->wrtrs_num--;
+      p_shm->wrtrs_num--;
       
       /*
        * If the actual writer is the last one, then he opens semaphore for
        * readers.
        */
-      if (shm->wrtrs_num == 0) {
-        sem_unlock(sem->read, "writer", id);
+      if (p_shm->wrtrs_num == 0) {
+        sem_unlock(p_sem->read, "writer", id);
       }
     }
-    sem_unlock(sem->wrtrs_num, "writer", id);
+    sem_unlock(p_sem->wrtrs_num, "writer", id);
   }
 
   
   /* Lock for 'writers alive'. */
-  sem_lock(sem->wrtrs_alive, "writer", id);
+  sem_lock(p_sem->wrtrs_alive, "writer", id);
   { 
     /* Writer is terminating, decreasing value. */
-    shm->wrtrs_alive--;
+    p_shm->wrtrs_alive--;
   }
-  sem_unlock(sem->wrtrs_alive, "writer", id);
+  sem_unlock(p_sem->wrtrs_alive, "writer", id);
 
-  semaphores_close(sem);
+  semaphores_close(p_sem);
 
   exit(EXIT_SUCCESS);
 }}}

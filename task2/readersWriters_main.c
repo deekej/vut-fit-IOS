@@ -1,6 +1,6 @@
 /**
  * File:          readersWriters_main.c
- * Version:       0.7
+ * Version:       0.9
  * Date:          29-04-2012
  * Last update:   02-05-2012
  *
@@ -81,6 +81,9 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 void process_args(int argc, char *argv[], TS_arguments *p_args);
 static inline void display_usage(char *prg_name);
 
+
+void create_children(TS_shared_mem *p_shm, TS_semaphores *p_sem,
+                     TS_arguments *p_args, int shm_fd, const char *prg_name);
 
 /******************************************************************************
  ~~~[ AUXILIARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -222,6 +225,85 @@ static inline void display_usage(char *prg_name)
  ~~~[ PRIMARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
 
+/**
+ * Function for creating all of children processes (forking).
+ */
+void create_children(TS_shared_mem *p_shm, TS_semaphores *p_sem,
+                     TS_arguments *p_args, int shm_fd, const char *prg_name)
+{{{
+  pid_t pid;                    /* PID of last forked process. */
+  pid_t pgid = 0;               /* PGID of children processes. */
+
+
+  /* Creating specified number of writers. */
+  for (unsigned i = 1; i <= p_args->wrtrs_num; i++) {
+    pid = fork();
+
+    if (pid == 0) {
+      /* Children process, acting as a writer. */
+      writer(p_shm, p_sem, i, p_args->wrtrs_slpt, p_args->cycles);
+    }
+    else if (pid < 0) {
+      /* Error occurred, terminating all children and sweeping. */
+      fprintf(stderr, "%s: ", prg_name);
+      perror("");
+      fprintf(stderr, "%s: terminating all children processes\n", prg_name);
+
+      killpg(pgid, SIGTERM);
+
+      /* Closing and unlinking semaphores. */
+      semaphores_close(p_sem);
+      semaphores_unlink();
+
+      close(shm_fd);                        /* Closing file descriptor. */
+      shm_unlink(SHARED_MEM);               /* Unlinking shared memory. */
+
+      exit(EXIT_FAILURE);
+    }
+    else if (i == 1) {
+      /* First forked process is the group leader. */
+      setpgid(pid, 0);
+      pgid = pid;
+    }
+    else {
+      setpgid(pid, pgid);                   /* Adding process to group. */
+    }
+  }
+
+  
+  /* Creating specified number of readers. */
+  for (unsigned i = 1; i <= p_args->rdrs_num; i++) {
+    pid = fork();
+
+    if (pid == 0) {
+      /* Children process, acting as a reader. */
+      reader(p_shm, p_sem, i, p_args->rdrs_slpt);
+    }
+    else if (pid < 0) {
+      /* Error occurred, terminating all children and sweeping. */
+      fprintf(stderr, "%s: ", prg_name);
+      perror("");
+      fprintf(stderr, "%s: terminating all children processes\n", prg_name);
+
+      killpg(pgid, SIGTERM);
+
+      /* Closing and unlinking semaphores. */
+      semaphores_close(p_sem);
+      semaphores_unlink();
+
+      close(shm_fd);                        /* Closing file descriptor. */
+      shm_unlink(SHARED_MEM);               /* Unlinking shared memory. */
+
+      exit(EXIT_FAILURE);
+    }
+    else {
+      setpgid(pid, pgid);                   /* Adding process to group. */
+    }
+  }  
+
+  return;
+}}}
+
 
 /******************************************************************************
  ~~~[ MAIN FUNCTION ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -245,8 +327,12 @@ int main(int argc, char *argv[])
 
   /* Terminating buffering so the output is immediately written. */
   setbuf(stdout, NULL);
-    
-              
+
+
+  /*
+   * Bigger part taking care of creating and opening shared memory for
+   * inter-process communication.
+   */
   int shm_fd;                         /* File descriptor for shared memory. */
   TS_shared_mem *p_shm;               /* Pointer to shared memory structure. */
  
@@ -280,7 +366,18 @@ int main(int argc, char *argv[])
   }
 
 
+  /* Shared memory initialization. */
+  p_shm->counter = 1;
+  p_shm->last_writer = -1;
 
+  p_shm->rdrs_num = 0;
+  p_shm->wrtrs_num = 0;
+  p_shm->wrtrs_alive = 0;
+
+
+  /*
+   * Creating and opening semaphores for synchronizing processes.
+   */
   TS_semaphores sem;
 
   if (semaphores_open(&sem) == EXIT_FAILURE) {
@@ -293,87 +390,31 @@ int main(int argc, char *argv[])
     return EXIT_FAILURE;
   }
 
-  /* Shared memory initialization. */
-  p_shm->counter = 1;
-  p_shm->last_writer = -1;
 
-  p_shm->rdrs_num = 0;
-  p_shm->wrtrs_num = 0;
-  p_shm->wrtrs_alive = 0;
+  /* Creating requested number of children. */
+  create_children(p_shm, &sem, &args, shm_fd, argv[0]);
 
+  /*
+   * Waiting until all writers are finished, then writing 0 to shared memory and
+   * waiting for readers to finish.
+   */
   pid_t pid;
-  pid_t pgid = 0;
-
-  for (unsigned i = 1; i <= args.wrtrs_num; i++) {
-    pid = fork();
-
-    if (pid == 0) {
-      writer(p_shm, &sem, i, args.wrtrs_slpt, args.cycles);
-    }
-    else if (pid < 0) {
-      fprintf(stderr, "%s: ", argv[0]);
-      perror("");
-      fprintf(stderr, "%s: terminating all children processes\n", argv[0]);
-
-      killpg(pgid, SIGTERM);
-
-      /* Closing and unlinking semaphores. */
-      semaphores_close(&sem);
-      semaphores_unlink();
-
-      close(shm_fd);                        /* Closing file descriptor. */
-      shm_unlink(SHARED_MEM);               /* Unlinking shared memory. */
-
-      exit(EXIT_FAILURE);
-    }
-    else if (i == 1) {
-      setpgid(pid, 0);
-      pgid = pid;
-    }
-    else {
-      setpgid(pid, pgid);
-    }
-  }
-
-  for (unsigned i = 1; i <= args.rdrs_num; i++) {
-    pid = fork();
-
-    if (pid == 0) {
-      reader(p_shm, &sem, i, args.rdrs_slpt);
-    }
-    else if (pid < 0) {
-      fprintf(stderr, "%s: ", argv[0]);
-      perror("");
-      fprintf(stderr, "%s: terminating all children processes\n", argv[0]);
-
-      killpg(pgid, SIGTERM);
-
-      /* Closing and unlinking semaphores. */
-      semaphores_close(&sem);
-      semaphores_unlink();
-
-      close(shm_fd);                        /* Closing file descriptor. */
-      shm_unlink(SHARED_MEM);               /* Unlinking shared memory. */
-
-      exit(EXIT_FAILURE);
-    }
-    else {
-      setpgid(pid, pgid);
-    }
-  }
-
 
   do {
     pid = wait(NULL);
 
     sem_lock(sem.wrtrs_alive, "main", 0);
+
     if (p_shm->wrtrs_alive == 0) {
       sem_lock(sem.read, "main", 0);
       sem_lock(sem.write, "main", 0);
+
       p_shm->last_writer = 0;
+
       sem_unlock(sem.write, "main", 0);
       sem_unlock(sem.read, "main", 0);
     }
+
     sem_unlock(sem.wrtrs_alive, "main", 0);
 
   } while (pid != -1);

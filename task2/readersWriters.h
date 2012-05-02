@@ -1,6 +1,6 @@
 /**
  * File:          readersWriters.h
- * Version:       0.7
+ * Version:       0.9
  * Date:          29-04-2012
  * Last update:   02-05-2012
  *
@@ -108,9 +108,10 @@ static inline int semaphores_open(TS_semaphores *sem);
 static inline void semaphores_close(TS_semaphores *sem);
 static inline void semaphores_unlink(void);
 
-void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt);
-void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
-            unsigned cycles);
+void reader(TS_shared_mem *p_shm, TS_semaphores *p_sem, unsigned id,
+            unsigned slpt);
+void writer(TS_shared_mem *p_shm, TS_semaphores *p_sem, unsigned id,
+            unsigned slpt, unsigned cycles);
 
 
 /******************************************************************************
