@@ -42,6 +42,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <semaphore.h>
@@ -123,8 +124,10 @@ void semaphores_unlink(void);
 static inline void sem_lock(sem_t *sem, const char *proc, unsigned id);
 static inline void sem_unlock(sem_t *sem, const char *proc, unsigned id);
 
+void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt);
 void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
             unsigned cycles);
+
 
 /******************************************************************************
  ~~~[ AUXILIARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -358,6 +361,88 @@ static inline void sem_unlock(sem_t *sem, const char *proc, unsigned id)
  ~~~[ PRIMARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
 
+void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt)
+{{{
+  int last_writer;
+
+  do {
+    /* Lock for actions counter (output). */
+    sem_lock(sem->counter, "reader", id);
+    {
+      fprintf(stdout, "%d: reader: %u: ready\n", shm->counter, id);
+      shm->counter++;
+    }
+    sem_unlock(sem->counter, "reader", id);
+
+  
+    /* Lock for reading request. */
+    sem_lock(sem->read, "reader", id);
+    {
+
+      /* Able to read, locking 'readers_num'. */
+      sem_lock(sem->rdrs_num, "reader", id);
+      {
+        shm->rdrs_num++;            /* Increasing number of readers. */
+        
+        /*
+         * If the actual reader is the first reader, then it locks semaphore of
+         * writer so he can't write into the shared memory while readers are
+         * reading.
+         */
+        if (shm->rdrs_num == 1) {
+          sem_lock(sem->write, "reader", id);
+        }
+      }
+      sem_unlock(sem->rdrs_num, "reader", id);
+    }
+    sem_unlock(sem->read, "reader", id);
+
+
+    sem_lock(sem->counter, "reader", id);
+    {
+      fprintf(stdout, "%d: reader: %u: reads a value\n", shm->counter, id);
+      shm->counter++;
+    }
+    sem_unlock(sem->counter, "reader", id);
+
+
+    last_writer = shm->last_writer;
+
+
+    sem_lock(sem->counter, "reader", id);
+    {
+      fprintf(stdout, "%d: reader: %u: read: %d\n", shm->counter, id,
+              last_writer);
+      shm->counter++;
+    }
+    sem_unlock(sem->counter, "reader", id);
+
+
+    sem_lock(sem->rdrs_num, "reader", id);
+    {
+      shm->rdrs_num--;
+
+      if (shm->rdrs_num == 0) {
+        sem_unlock(sem->write, "reader", id);
+      }
+    }
+    sem_unlock(sem->rdrs_num, "reader", id);
+
+
+    /* Trying to put process to sleep from 0 to slpt milliseconds. */
+    if (slpt != 0 && usleep(1000 * (rand() % slpt)) != 0) {
+      fprintf(stderr, "reader: %u: ", id);
+      perror("");
+      exit(EXIT_FAILURE);
+    }
+
+
+  } while (last_writer != 0);
+
+  exit(EXIT_SUCCESS);
+}}}
+
+
 void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
             unsigned cycles)
 {{{
@@ -505,7 +590,7 @@ int main(int argc, char *argv[])
 
 
   int shm_fd;                         /* File descriptor for shared memory. */
-  TS_shared_mem *shm;                 /* Pointer to shared memory structure. */
+  TS_shared_mem *p_shm;               /* Pointer to shared memory structure. */
  
   /* Try to create and open shared memory. */ 
   if ((shm_fd = shm_open(SHARED_MEM, O_CREAT | O_RDWR, 0600)) < 0) {
@@ -525,7 +610,7 @@ int main(int argc, char *argv[])
     return EXIT_FAILURE;
   }
   /* Mapping shared memory into this process's virtual address space. */
-  else if ((shm = mmap(NULL, sizeof(TS_shared_mem), PROT_READ | PROT_WRITE,
+  else if ((p_shm = mmap(NULL, sizeof(TS_shared_mem), PROT_READ | PROT_WRITE,
                        MAP_SHARED, shm_fd, 0)) == MAP_FAILED) {
     fprintf(stderr, "%s: ", argv[0]);
     perror("");
@@ -535,6 +620,8 @@ int main(int argc, char *argv[])
 
     return EXIT_FAILURE;
   }
+
+
 
   TS_semaphores sem;
 
@@ -549,14 +636,53 @@ int main(int argc, char *argv[])
   }
 
   /* Shared memory initialization. */
-  shm->counter = 1;
-  shm->last_writer = -1;
+  p_shm->counter = 1;
+  p_shm->last_writer = -1;
 
-  shm->rdrs_num = 0;
-  shm->wrtrs_num = 0;
-  shm->wrtrs_alive = 0;
+  p_shm->rdrs_num = 0;
+  p_shm->wrtrs_num = 0;
+  p_shm->wrtrs_alive = 0;
 
+  pid_t pid;
 
+  for (unsigned i = 1; i <= args.writers_num; i++) {
+    pid = fork();
+
+    if (pid == 0) {
+      writer(p_shm, &sem, i, args.writers_slpt, args.cycles_count);
+    }
+    else if (pid < 0) {
+      perror("fork: ");
+    }
+    // Setting of gid.
+  }
+
+  for (unsigned i = 1; i <= args.readers_num; i++) {
+    pid = fork();
+
+    if (pid == 0) {
+      reader(p_shm, &sem, i, args.readers_slpt);
+    }
+    else if (pid < 0) {
+      perror("fork: ");
+    }
+    // Setting of gid.
+  }
+
+  do {
+    pid = wait(NULL);
+
+    sem_lock(sem.wrtrs_alive, "main", 0);
+    if (p_shm->wrtrs_alive == 0) {
+      sem_lock(sem.read, "main", 0);
+      sem_lock(sem.write, "main", 0);
+      p_shm->last_writer = 0;
+      sem_unlock(sem.write, "main", 0);
+      sem_unlock(sem.read, "main", 0);
+    }
+    sem_unlock(sem.wrtrs_alive, "main", 0);
+
+  } while (pid != -1);
 
 
   // TODO: Children creating.
