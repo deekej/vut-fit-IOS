@@ -1,8 +1,8 @@
 /**
  * File:          readersWriters_main.c
- * Version:       0.0
+ * Version:       0.7
  * Date:          29-04-2012
- * Last update:   29-04-2012
+ * Last update:   02-05-2012
  *
  * Course:        IOS (summer semester, 2012)
  * Project:       Project #2 (Processes synchronization problem.)
@@ -31,13 +31,11 @@
 /******************************************************************************
  ~~~[ HEADER FILES ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
-//{{{
+
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -46,7 +44,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <semaphore.h>
-//}}}
+
+#include "readersWriters.h"
+
 
 /******************************************************************************
  ~~~[ GLOBAL CONSTANTS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -73,44 +73,20 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 /******************************************************************************
  ~~~[ DATA TYPES DECLARATIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
-//{{{
+
 /* Structure for storing processed arguments of invocated program.  */
  typedef struct arguments {
-  unsigned writers_num;                   /* Number of writers. */
-  unsigned writers_slpt;                  /* Sleep time of writers [ms]. */
+  unsigned wrtrs_num;                     /* Number of writers. */
+  unsigned wrtrs_slpt;                    /* Sleep time of writers [ms]. */
 
-  unsigned readers_num;                   /* Number of readers. */
-  unsigned readers_slpt;                  /* Sleep time of writers [ms]. */
+  unsigned rdrs_num;                      /* Number of readers. */
+  unsigned rdrs_slpt;                     /* Sleep time of writers [ms]. */
 
-  unsigned cycles_count;                  /* Number of cycles. */
+  unsigned cycles;                        /* Number of cycles. */
 
   char *p_fname;                          /* Output filename. */
  } TS_arguments;
 
-
-/* Structure to be mapped as a shared memory between processes. */
- typedef struct shared_mem {
-  int counter;                            /* Actions counter. */
-  int last_writer;                        /* Internal number of last writer. */
-
-  unsigned rdrs_num;                      /* Number of readers reading. */
-  unsigned wrtrs_num;                     /* Number of writers writing. */
-
-  unsigned wrtrs_alive;                   /* Number of writers alive. */
- } TS_shared_mem;
-
-
-/* Structure containing pointers to all semaphores used by program. */
-typedef struct semaphores {
-  sem_t *read;                /* Semaphore of reading possibility. */
-  sem_t *write;               /* Semaphore of writing possibility. */
-  sem_t *rdrs_front;          /* Semaphore front of readers. */
-  sem_t *rdrs_num;            /* Semaphore of shared memory for rdrs_num. */
-  sem_t *wrtrs_num;           /* Semaphore of shared memory for wrtrs_num. */
-  sem_t *counter;             /* Semaphore of shared memory for act_count. */
-  sem_t *wrtrs_alive;         /* Semaphore of shared memory for wrtrs_alive. */
-} TS_semaphores;
-//}}}
 
 /******************************************************************************
  ~~~[ FUNCTIONAL PROTOTYPES ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -122,13 +98,6 @@ static inline void display_usage(char *prg_name);
 int semaphores_open(TS_semaphores *sem);
 void semaphores_close(TS_semaphores *sem);
 void semaphores_unlink(void);
-
-static inline void sem_lock(sem_t *sem, const char *proc, unsigned id);
-static inline void sem_unlock(sem_t *sem, const char *proc, unsigned id);
-
-void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt);
-void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
-            unsigned cycles);
 
 
 /******************************************************************************
@@ -198,23 +167,23 @@ void process_args(int argc, char *argv[], TS_arguments *p_args)
     /* Assigning into appropriate member of given structure. */
     switch (i) {
       case 1 :
-        p_args->writers_num = (unsigned) result;
+        p_args->wrtrs_num = (unsigned) result;
         break;
 
       case 2 :
-        p_args->readers_num = (unsigned) result;
+        p_args->rdrs_num = (unsigned) result;
         break;
 
       case 3 :
-        p_args->cycles_count = (unsigned) result;
+        p_args->cycles = (unsigned) result;
         break;
 
       case 4 :
-        p_args->writers_slpt = (unsigned) result;
+        p_args->wrtrs_slpt = (unsigned) result;
         break;
 
       case 5 :
-        p_args->readers_slpt = (unsigned) result;
+        p_args->rdrs_slpt = (unsigned) result;
         break;
 
       default :
@@ -329,249 +298,9 @@ void semaphores_unlink(void)
 }}}
 
 
-/**
- * Wrapper function for semaphore locking. Terminates the process in case
- * semaphore lock cannot be achieved. Proc is the name of process who is
- * performing the lock, id is his identifier.
- */
-static inline void sem_lock(sem_t *sem, const char *proc, unsigned id)
-{{{
-  if (sem_wait(sem) != 0) {
-    fprintf(stderr, "%s: %u: ", proc, id);
-    perror("");
-    exit(EXIT_FAILURE);
-  }
-  
-  return;
-}}}
-
-
-/**
- * Wrapper function for semaphore unlocking. Terminates the process in case
- * semaphore unlock cannot be achieved. Proc is the name of process who is
- * performing the unlock, id is his identifier.
- */
-static inline void sem_unlock(sem_t *sem, const char *proc, unsigned id)
-{{{
-  if (sem_post(sem) != 0) {
-    fprintf(stderr, "%s: %u: ", proc, id);
-    perror("");
-    exit(EXIT_FAILURE);
-  }
-  
-  return;
-}}}
-
-
 /******************************************************************************
  ~~~[ PRIMARY FUNCTIONS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
-
-void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt)
-{{{
-  int last_writer;
-
-  do {
-    /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "reader", id);
-    {
-      fprintf(stdout, "%d: reader: %u: ready\n", shm->counter, id);
-      shm->counter++;
-    }
-    sem_unlock(sem->counter, "reader", id);
-    
-    /* Locking of readers queue (writers has absolute priority). */
-    sem_lock(sem->rdrs_front, "reader", id);
-    { 
-
-      /* Lock for reading request. */
-      sem_lock(sem->read, "reader", id);
-      {
-
-        /* Able to read, locking 'readers_num'. */
-        sem_lock(sem->rdrs_num, "reader", id);
-        {
-          shm->rdrs_num++;            /* Increasing number of readers. */
-          
-          /*
-          * If the actual reader is the first reader, then it locks semaphore of
-          * writer so he can't write into the shared memory while readers are
-          * reading.
-          */
-          if (shm->rdrs_num == 1) {
-            sem_lock(sem->write, "reader", id);
-          }
-        }
-        sem_unlock(sem->rdrs_num, "reader", id);
-      }
-      sem_unlock(sem->read, "reader", id);
-    }
-    sem_unlock(sem->rdrs_front, "reader", id);
-
-
-    sem_lock(sem->counter, "reader", id);
-    {
-      fprintf(stdout, "%d: reader: %u: reads a value\n", shm->counter, id);
-      shm->counter++;
-    }
-    sem_unlock(sem->counter, "reader", id);
-
-
-    last_writer = shm->last_writer;
-
-
-    sem_lock(sem->counter, "reader", id);
-    {
-      fprintf(stdout, "%d: reader: %u: read: %d\n", shm->counter, id,
-              last_writer);
-      shm->counter++;
-    }
-    sem_unlock(sem->counter, "reader", id);
-
-
-    sem_lock(sem->rdrs_num, "reader", id);
-    {
-      shm->rdrs_num--;
-
-      if (shm->rdrs_num == 0) {
-        sem_unlock(sem->write, "reader", id);
-      }
-    }
-    sem_unlock(sem->rdrs_num, "reader", id);
-
-
-    /* Trying to put process to sleep from 0 to slpt milliseconds. */
-    if (slpt != 0 && usleep(1000 * (rand() % slpt)) != 0) {
-      fprintf(stderr, "reader: %u: ", id);
-      perror("");
-      exit(EXIT_FAILURE);
-    }
-
-
-  } while (last_writer != 0);
-
-  exit(EXIT_SUCCESS);
-}}}
-
-
-void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
-            unsigned cycles)
-{{{
-  /* Lock for 'writers alive'. */
-  sem_lock(sem->wrtrs_alive, "writer", id);
-  {
-    /* 
-     * Increasing value, so the main can determine how many writers are still 
-     * alive.
-     */
-    shm->wrtrs_alive++;
-  }
-  sem_unlock(sem->wrtrs_alive, "writer", id);
-
-
-  srand((unsigned int) time(NULL));
-
-  
-  /* Repeats for number specified in cycles. */
-  for (unsigned i = 0; i < cycles; i++) {
-
-    /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "writer", id);
-    {
-      fprintf(stdout, "%d: writer: %u: new value\n", shm->counter, id);
-      shm->counter++;
-    }
-    sem_unlock(sem->counter, "writer", id);
-
-
-    /* Trying to put process to sleep from 0 to slpt milliseconds. */
-    if (slpt != 0 && usleep(1000 * (rand() % slpt)) != 0) {
-      fprintf(stderr, "writer: %u: ", id);
-      perror("");
-      exit(EXIT_FAILURE);
-    }
-
-
-    /* Lock for actions counter (output). */
-    sem_lock(sem->counter, "writer", id);
-    {
-      fprintf(stdout, "%d: writer: %u: ready\n", shm->counter, id);
-      shm->counter++;
-    }
-    sem_unlock(sem->counter, "writer", id);
-
-    
-    /* Lock for number of actual writers writing. */
-    sem_lock(sem->wrtrs_num, "writer", id);
-    {
-      shm->wrtrs_num++;
-      
-      /*
-       * First writer also locks 'read' semaphore, so the new coming readers
-       * can't access the shared memory for the time of writers performing
-       * actions.
-       */
-      if (shm->wrtrs_num == 1) {
-        sem_lock(sem->read, "writer", id);
-      }
-    }
-    sem_unlock(sem->wrtrs_num, "writer", id);
-
-
-    /* 
-     * Lock for writer's semaphore, allowing only one writer at the time to edit
-     * shared memory.
-     */
-    sem_lock(sem->write, "writer", id);
-    {
-      /* Lock for actions counter (output). */
-      sem_lock(sem->counter, "writer", id);
-      {
-        fprintf(stdout, "%d: writer: %u: writes a value\n", shm->counter, id);
-        shm->counter++;
-      }
-      sem_unlock(sem->counter, "writer", id);
-      
-      shm->last_writer = id;              /* Writer is writing his value. */
-      
-      /* Lock for actions counter (output). */
-      sem_lock(sem->counter, "writer", id);
-      {
-        fprintf(stdout, "%d: writer: %u: written\n", shm->counter, id);
-        shm->counter++;
-      }
-      sem_unlock(sem->counter, "writer", id);
-    }
-    sem_unlock(sem->write, "writer", id);
-
-  
-    /* Lock for number of actual writers writing. */
-    sem_lock(sem->wrtrs_num, "writer", id);
-    {
-      shm->wrtrs_num--;
-      
-      /*
-       * If the actual writer is the last one, then he opens semaphore for
-       * readers.
-       */
-      if (shm->wrtrs_num == 0) {
-        sem_unlock(sem->read, "writer", id);
-      }
-    }
-    sem_unlock(sem->wrtrs_num, "writer", id);
-  }
-
-  
-  /* Lock for 'writers alive'. */
-  sem_lock(sem->wrtrs_alive, "writer", id);
-  { 
-    /* Writer is terminating, decreasing value. */
-    shm->wrtrs_alive--;
-  }
-  sem_unlock(sem->wrtrs_alive, "writer", id);
-
-  exit(EXIT_SUCCESS);
-}}}
 
 
 /******************************************************************************
@@ -656,11 +385,11 @@ int main(int argc, char *argv[])
 
   pid_t pid;
 
-  for (unsigned i = 1; i <= args.writers_num; i++) {
+  for (unsigned i = 1; i <= args.wrtrs_num; i++) {
     pid = fork();
 
     if (pid == 0) {
-      writer(p_shm, &sem, i, args.writers_slpt, args.cycles_count);
+      writer(p_shm, &sem, i, args.wrtrs_slpt, args.cycles);
     }
     else if (pid < 0) {
       perror("fork: ");
@@ -668,11 +397,11 @@ int main(int argc, char *argv[])
     // Setting of gid.
   }
 
-  for (unsigned i = 1; i <= args.readers_num; i++) {
+  for (unsigned i = 1; i <= args.rdrs_num; i++) {
     pid = fork();
 
     if (pid == 0) {
-      reader(p_shm, &sem, i, args.readers_slpt);
+      reader(p_shm, &sem, i, args.rdrs_slpt);
     }
     else if (pid < 0) {
       perror("fork: ");
