@@ -140,6 +140,8 @@ void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt)
   /* Reads until the read value is 0. */
   } while (last_writer != 0);
 
+  semaphores_close(sem);
+
   exit(EXIT_SUCCESS);
 }}}
 

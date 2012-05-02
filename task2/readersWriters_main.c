@@ -44,6 +44,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <semaphore.h>
+#include <signal.h>
 
 #include "readersWriters.h"
 
@@ -51,21 +52,6 @@
 /******************************************************************************
  ~~~[ GLOBAL CONSTANTS ]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  ******************************************************************************/
-
-/* Name to be used to identify shared memory and semaphores of this program. */
-#define SHM_NAME "/xkaspa34"
-
-/* Name of shared memory. */
-#define SHARED_MEM        SHM_NAME "_shm"
-
-/* Names of semaphores used. */
-#define SEM_READ          SHM_NAME "_read"
-#define SEM_WRITE         SHM_NAME "_write"
-#define SEM_RDRS_FRONT    SHM_NAME "_rdrs_front"
-#define SEM_RDRS_NUM      SHM_NAME "_rdrs_num"
-#define SEM_WRTRS_NUM     SHM_NAME "_wrtrs_num"
-#define SEM_COUNTER       SHM_NAME "_counter"
-#define SEM_WRTRS_ALIVE   SHM_NAME "_wrtrs_alive"
 
 const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
@@ -94,10 +80,6 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 
 void process_args(int argc, char *argv[], TS_arguments *p_args);
 static inline void display_usage(char *prg_name);
-
-int semaphores_open(TS_semaphores *sem);
-void semaphores_close(TS_semaphores *sem);
-void semaphores_unlink(void);
 
 
 /******************************************************************************
@@ -198,6 +180,14 @@ void process_args(int argc, char *argv[], TS_arguments *p_args)
   else {
     p_args->p_fname = argv[i];
   }
+  
+  /* Test if at least 1 writer and 1 reader was entered. */
+  if (p_args->wrtrs_num < 1 || p_args->rdrs_num < 1) {
+    fprintf(stderr, "%s: at least 1 writer and 1 reader is required\n",
+            argv[0]);
+    display_usage(argv[0]);
+    exit(EXIT_FAILURE);
+  }
 
   return;
 }}}
@@ -224,76 +214,6 @@ static inline void display_usage(char *prg_name)
                   "\n"
                   "Written by David Kaspar aka Dee'Kej "
                   "(xkaspa34@stud.fit.vutbr.cz).\n", prg_name);
-  return;
-}}}
-
-
-/**
- * Tries to open all semaphores of given TS_semaphores structure. Returns
- * EXIT_FAILURE and errno is set, otherwise EXIT_SUCCESS is returned.
- */
-int semaphores_open(TS_semaphores *sem)
-{{{
-  /* Opening and initializing semaphores in given semaphores structure. */
-  sem->read = sem_open(SEM_READ, O_CREAT, 0600, 1);
-  sem->write = sem_open(SEM_WRITE, O_CREAT, 0600, 1);
-  sem->rdrs_front = sem_open(SEM_RDRS_FRONT, O_CREAT, 0600, 1);
-  sem->rdrs_num = sem_open(SEM_RDRS_NUM, O_CREAT, 0600, 1);
-  sem->wrtrs_num = sem_open(SEM_WRTRS_NUM, O_CREAT, 0600, 1);
-  sem->counter = sem_open(SEM_COUNTER, O_CREAT, 0600, 1);
-  sem->wrtrs_alive = sem_open(SEM_WRTRS_ALIVE, O_CREAT, 0600, 1);
-
-  /* Test of successful opening of semaphores. */
-  if (sem->read == SEM_FAILED || sem->write == SEM_FAILED ||
-      sem->rdrs_front == SEM_FAILED || sem->rdrs_num == SEM_FAILED ||
-      sem->wrtrs_num == SEM_FAILED || sem->counter == SEM_FAILED ||
-      sem->wrtrs_alive == SEM_FAILED) {
-    
-    /* Backup of errno because functions below can change it. */
-    int errno_backup = errno;
-
-    /* Closing and unlinking semaphores because of opening failure. */
-    semaphores_close(sem);
-    semaphores_unlink();
-
-    errno = errno_backup;
-    return EXIT_FAILURE;
-  }
-
-  return EXIT_SUCCESS;
-}}}
-
-
-/**
- * Tries to close every semaphore of given TS_semaphores structure.
- */
-void semaphores_close(TS_semaphores *sem)
-{{{
-  sem_close(sem->read);
-  sem_close(sem->write);
-  sem_close(sem->rdrs_front);
-  sem_close(sem->rdrs_num);
-  sem_close(sem->wrtrs_num);
-  sem_close(sem->counter);
-  sem_close(sem->wrtrs_alive);
-
-  return;
-}}}
-
-
-/**
- * Tries to unlink all semaphores of this program.
- */
-void semaphores_unlink(void)
-{{{
-  sem_unlink(SEM_READ);
-  sem_unlink(SEM_WRITE);
-  sem_unlink(SEM_RDRS_FRONT);
-  sem_unlink(SEM_RDRS_NUM);
-  sem_unlink(SEM_WRTRS_NUM);
-  sem_unlink(SEM_COUNTER);
-  sem_unlink(SEM_WRTRS_ALIVE);
-
   return;
 }}}
 
@@ -325,10 +245,8 @@ int main(int argc, char *argv[])
 
   /* Terminating buffering so the output is immediately written. */
   setbuf(stdout, NULL);
-  
+    
               
-
-
   int shm_fd;                         /* File descriptor for shared memory. */
   TS_shared_mem *p_shm;               /* Pointer to shared memory structure. */
  
@@ -384,6 +302,7 @@ int main(int argc, char *argv[])
   p_shm->wrtrs_alive = 0;
 
   pid_t pid;
+  pid_t pgid = 0;
 
   for (unsigned i = 1; i <= args.wrtrs_num; i++) {
     pid = fork();
@@ -392,9 +311,28 @@ int main(int argc, char *argv[])
       writer(p_shm, &sem, i, args.wrtrs_slpt, args.cycles);
     }
     else if (pid < 0) {
-      perror("fork: ");
+      fprintf(stderr, "%s: ", argv[0]);
+      perror("");
+      fprintf(stderr, "%s: terminating all children processes\n", argv[0]);
+
+      killpg(pgid, SIGTERM);
+
+      /* Closing and unlinking semaphores. */
+      semaphores_close(&sem);
+      semaphores_unlink();
+
+      close(shm_fd);                        /* Closing file descriptor. */
+      shm_unlink(SHARED_MEM);               /* Unlinking shared memory. */
+
+      exit(EXIT_FAILURE);
     }
-    // Setting of gid.
+    else if (i == 1) {
+      setpgid(pid, 0);
+      pgid = pid;
+    }
+    else {
+      setpgid(pid, pgid);
+    }
   }
 
   for (unsigned i = 1; i <= args.rdrs_num; i++) {
@@ -404,10 +342,26 @@ int main(int argc, char *argv[])
       reader(p_shm, &sem, i, args.rdrs_slpt);
     }
     else if (pid < 0) {
-      perror("fork: ");
+      fprintf(stderr, "%s: ", argv[0]);
+      perror("");
+      fprintf(stderr, "%s: terminating all children processes\n", argv[0]);
+
+      killpg(pgid, SIGTERM);
+
+      /* Closing and unlinking semaphores. */
+      semaphores_close(&sem);
+      semaphores_unlink();
+
+      close(shm_fd);                        /* Closing file descriptor. */
+      shm_unlink(SHARED_MEM);               /* Unlinking shared memory. */
+
+      exit(EXIT_FAILURE);
     }
-    // Setting of gid.
+    else {
+      setpgid(pid, pgid);
+    }
   }
+
 
   do {
     pid = wait(NULL);
@@ -423,11 +377,6 @@ int main(int argc, char *argv[])
     sem_unlock(sem.wrtrs_alive, "main", 0);
 
   } while (pid != -1);
-
-
-  // TODO: Children creating.
-
-  // TODO: Waiting until children are gone.
 
 
   /* Closing and unlinking semaphores. */

@@ -170,6 +170,8 @@ void writer(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt,
   }
   sem_unlock(sem->wrtrs_alive, "writer", id);
 
+  semaphores_close(sem);
+
   exit(EXIT_SUCCESS);
 }}}
 
