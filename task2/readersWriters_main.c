@@ -61,6 +61,7 @@
 /* Names of semaphores used. */
 #define SEM_READ          SHM_NAME "_read"
 #define SEM_WRITE         SHM_NAME "_write"
+#define SEM_RDRS_FRONT    SHM_NAME "_rdrs_front"
 #define SEM_RDRS_NUM      SHM_NAME "_rdrs_num"
 #define SEM_WRTRS_NUM     SHM_NAME "_wrtrs_num"
 #define SEM_COUNTER       SHM_NAME "_counter"
@@ -103,6 +104,7 @@ const int ARGS_NUM = 6;                   /* 6 arguments required. */
 typedef struct semaphores {
   sem_t *read;                /* Semaphore of reading possibility. */
   sem_t *write;               /* Semaphore of writing possibility. */
+  sem_t *rdrs_front;          /* Semaphore front of readers. */
   sem_t *rdrs_num;            /* Semaphore of shared memory for rdrs_num. */
   sem_t *wrtrs_num;           /* Semaphore of shared memory for wrtrs_num. */
   sem_t *counter;             /* Semaphore of shared memory for act_count. */
@@ -266,15 +268,17 @@ int semaphores_open(TS_semaphores *sem)
   /* Opening and initializing semaphores in given semaphores structure. */
   sem->read = sem_open(SEM_READ, O_CREAT, 0600, 1);
   sem->write = sem_open(SEM_WRITE, O_CREAT, 0600, 1);
+  sem->rdrs_front = sem_open(SEM_RDRS_FRONT, O_CREAT, 0600, 1);
   sem->rdrs_num = sem_open(SEM_RDRS_NUM, O_CREAT, 0600, 1);
   sem->wrtrs_num = sem_open(SEM_WRTRS_NUM, O_CREAT, 0600, 1);
   sem->counter = sem_open(SEM_COUNTER, O_CREAT, 0600, 1);
   sem->wrtrs_alive = sem_open(SEM_WRTRS_ALIVE, O_CREAT, 0600, 1);
 
   /* Test of successful opening of semaphores. */
-  if (sem->write == SEM_FAILED || sem->wrtrs_num == SEM_FAILED ||
-      sem->read == SEM_FAILED || sem->rdrs_num == SEM_FAILED ||
-      sem->counter == SEM_FAILED || sem->wrtrs_alive == SEM_FAILED) {
+  if (sem->read == SEM_FAILED || sem->write == SEM_FAILED ||
+      sem->rdrs_front == SEM_FAILED || sem->rdrs_num == SEM_FAILED ||
+      sem->wrtrs_num == SEM_FAILED || sem->counter == SEM_FAILED ||
+      sem->wrtrs_alive == SEM_FAILED) {
     
     /* Backup of errno because functions below can change it. */
     int errno_backup = errno;
@@ -298,6 +302,7 @@ void semaphores_close(TS_semaphores *sem)
 {{{
   sem_close(sem->read);
   sem_close(sem->write);
+  sem_close(sem->rdrs_front);
   sem_close(sem->rdrs_num);
   sem_close(sem->wrtrs_num);
   sem_close(sem->counter);
@@ -314,6 +319,7 @@ void semaphores_unlink(void)
 {{{
   sem_unlink(SEM_READ);
   sem_unlink(SEM_WRITE);
+  sem_unlink(SEM_RDRS_FRONT);
   sem_unlink(SEM_RDRS_NUM);
   sem_unlink(SEM_WRTRS_NUM);
   sem_unlink(SEM_COUNTER);
@@ -373,29 +379,34 @@ void reader(TS_shared_mem *shm, TS_semaphores *sem, unsigned id, unsigned slpt)
       shm->counter++;
     }
     sem_unlock(sem->counter, "reader", id);
+    
+    /* Locking of readers queue (writers has absolute priority). */
+    sem_lock(sem->rdrs_front, "reader", id);
+    { 
 
-  
-    /* Lock for reading request. */
-    sem_lock(sem->read, "reader", id);
-    {
-
-      /* Able to read, locking 'readers_num'. */
-      sem_lock(sem->rdrs_num, "reader", id);
+      /* Lock for reading request. */
+      sem_lock(sem->read, "reader", id);
       {
-        shm->rdrs_num++;            /* Increasing number of readers. */
-        
-        /*
-         * If the actual reader is the first reader, then it locks semaphore of
-         * writer so he can't write into the shared memory while readers are
-         * reading.
-         */
-        if (shm->rdrs_num == 1) {
-          sem_lock(sem->write, "reader", id);
+
+        /* Able to read, locking 'readers_num'. */
+        sem_lock(sem->rdrs_num, "reader", id);
+        {
+          shm->rdrs_num++;            /* Increasing number of readers. */
+          
+          /*
+          * If the actual reader is the first reader, then it locks semaphore of
+          * writer so he can't write into the shared memory while readers are
+          * reading.
+          */
+          if (shm->rdrs_num == 1) {
+            sem_lock(sem->write, "reader", id);
+          }
         }
+        sem_unlock(sem->rdrs_num, "reader", id);
       }
-      sem_unlock(sem->rdrs_num, "reader", id);
+      sem_unlock(sem->read, "reader", id);
     }
-    sem_unlock(sem->read, "reader", id);
+    sem_unlock(sem->rdrs_front, "reader", id);
 
 
     sem_lock(sem->counter, "reader", id);
