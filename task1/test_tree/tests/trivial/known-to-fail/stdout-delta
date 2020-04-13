@@ -1,0 +1,5 @@
+--- ./trivial/known-to-fail/stdout-expected	2012-02-19 17:29:00.216448795 +0100
++++ ./trivial/known-to-fail/stdout-captured	2012-02-19 17:29:01.248453919 +0100
+@@ -1 +1 @@
+-/proc/15064
++/proc/15100
